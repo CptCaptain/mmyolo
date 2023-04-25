@@ -1,4 +1,4 @@
-custom_imports = dict(imports=['finetunecopypaste'], allow_failed_imports=False)
+custom_imports = dict(imports=['fcp_new'], allow_failed_imports=False)
 
 _base_ = './yolov8_s_syncbn_fast_8xb16-300e_coco.py'
 
@@ -18,9 +18,57 @@ CLASSES = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
                # 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush')
                'vase', 'scissors', 'teddy bear', 'Audi_A7', 'Audi_RS_6_Avant')
 
-pre_transform = _base_.pre_transform
-albu_train_transform = _base_.albu_train_transform
+albu_train_transforms = [
+    dict(type='Blur', p=0.01),
+    dict(type='MedianBlur', p=0.01),
+    dict(type='ToGray', p=0.01),
+    dict(type='CLAHE', p=0.01)
+]
 last_transform = _base_.last_transform
+pre_transform = [
+    dict(type='LoadImageFromFile', file_client_args=_base_.file_client_args),
+    dict(type='mmdet.LoadAnnotations', with_bbox=True, with_mask=True)
+]
+
+
+# image_size = (1024, 1024)
+file_client_args = _base_.file_client_args
+
+deepen_factor = 0.67
+widen_factor = 0.75
+last_stage_out_channels = 768
+
+lr_factor = 0.01
+
+max_epochs = 300
+save_epoch_intervals = 10
+
+affine_scale = 0.9
+mixup_ratio = 0.1
+img_scale = _base_.img_scale
+image_size = img_scale
+
+# Standard Scale Jittering (SSJ) resizes and crops an image
+# with a resize range of 0.8 to 1.25 of the original image size.
+load_pipeline = [
+    dict(type='LoadImageFromFile', file_client_args=file_client_args),
+    dict(type='mmdet.LoadAnnotations', with_bbox=True, with_mask=True),
+    # dict(type='LoadAnnotations', with_bbox=True),
+    # dict(
+        # type='mmdet.RandomResize',
+        # scale=image_size,
+        # ratio_range=(0.8, 1.25),
+        # keep_ratio=True),
+    # dict(
+        # type='mmdet.RandomCrop',
+        # crop_type='absolute_range',
+        # crop_size=image_size,
+        # recompute_bbox=True,
+        # allow_negative_crop=True),
+    dict(type='mmdet.FilterAnnotations', min_gt_bbox_wh=(1e-2, 1e-2)),
+    dict(type='mmdet.RandomFlip', prob=0.5),
+    dict(type='mmdet.Pad', size=image_size),
+]
 
 mosaic_affine_transform = [
     dict(
@@ -45,13 +93,13 @@ fcp_albu_transforms = [
         transforms=[
             dict(
                 type='Resize',
-                width=image_size[1],
-                height=image_size[0],
+                width=img_scale[1],
+                height=img_scale[0],
             ),
             dict(
                 type='RandomResizedCrop',
-                width=image_size[1],
-                height=image_size[0],
+                width=img_scale[1],
+                height=img_scale[0],
             ),
         ],
         p=1.0
@@ -107,13 +155,13 @@ fcp_albu_transforms = [
         ),
     dict(
         type='Resize',
-        width=image_size[1],
-        height=image_size[0],
+        width=img_scale[1],
+        height=img_scale[0],
         ),
     dict(
         type='PadIfNeeded',
-        min_width=image_size[1],
-        min_height=image_size[0],
+        min_width=img_scale[1],
+        min_height=img_scale[0],
         border_mode=0,
         p=1.0,
         ),
@@ -130,18 +178,24 @@ fcp_pipeline = [
             img_prefix='raw',
             pipeline=[
                 dict(type='LoadImageFromFile', file_client_args=file_client_args),
-                dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
+                dict(type='mmdet.LoadAnnotations', with_bbox=True, with_mask=True),
+                dict(type='mmdet.FixShapeResize', width=img_scale[0], height=img_scale[1]),
                 dict(
-                    type='Albu',
+                    type='mmdet.Albu',
                     transforms=fcp_albu_transforms,
                     bbox_params=dict(
                         type='BboxParams',
                         format='pascal_voc',
-                        label_fields=['gt_labels'],
+                        label_fields=['gt_bboxes_labels', 'gt_ignore_flags'],
+                        # label_fields=['gt_labels'],
                         min_visibility=0.0,
                         filter_lost_elements=True,
                     ),
-                    update_pad_shape=False,
+                    keymap={
+                        'img': 'image',
+                        'gt_bboxes': 'bboxes'
+                    },
+                    # update_pad_shape=False,
                     skip_img_without_anno=True,
                 ),
             ],
@@ -154,18 +208,44 @@ fcp_pipeline = [
 ]
 
 train_pipeline = [
-    *pre_transform, *fcp_pipeline, *mosaic_affine_transform,
+    *load_pipeline,
+    *fcp_pipeline,
     dict(
-        type='YOLOv5MixUp',
-        prob=mixup_ratio,
-        pre_transform=[*pre_transform, *fcp_pipeline, *mosaic_affine_transform]),
-    *last_transform
+        type='mmdet.PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'flip',
+                   'flip_direction'))
 ]
 
-train_dataloader = dict(dataset=dict(pipeline=train_pipeline))
+ #train_dataloader = dict(dataset=dict(pipeline=train_pipeline))
+train_dataloader = dict(
+    dataset=dict(
+        _delete_=True,
+        type='MultiImageMixDataset',
+        dataset=dict(
+            type = 'YOLOv5CocoDataset',
+            data_root=_base_.data_root,
+            ann_file='annotations/instances_train2017.json',
+            data_prefix=dict(img='train2017/'),
+            filter_cfg=dict(filter_empty_gt=False, min_size=32),
+            metainfo=dict(
+                classes=CLASSES,
+            ),
+            pipeline=load_pipeline,
+        ),
+        pipeline=train_pipeline,
+    ))
+
+val_dataloader = dict(
+    dataset=dict(
+        metainfo=dict(
+            classes=CLASSES,
+        ),
+))
 
 train_pipeline_stage2 = [
-    *pre_transform, *fcp_pipeline, 
+    # *pre_transform, # *fcp_pipeline, 
+    *load_pipeline,
+    # *fcp_pipeline,
     dict(type='YOLOv5KeepRatioResize', scale=img_scale),
     dict(
         type='LetterResize',
@@ -178,8 +258,25 @@ train_pipeline_stage2 = [
         max_shear_degree=0.0,
         scaling_ratio_range=(1 - affine_scale, 1 + affine_scale),
         max_aspect_ratio=100,
-        border_val=(114, 114, 114)), *last_transform
+        border_val=(114, 114, 114)),
+    dict(
+        type='mmdet.PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'flip',
+                   'flip_direction')),
+    #*last_transform
 ]
+default_hooks = dict(
+    param_scheduler=dict(
+        type='YOLOv5ParamSchedulerHook',
+        scheduler_type='linear',
+        lr_factor=lr_factor,
+        max_epochs=max_epochs),
+    checkpoint=dict(
+        type='CheckpointHook',
+        interval=1,
+        save_best='auto',
+        max_keep_ckpts=2))
+
 
 custom_hooks = [
     dict(
