@@ -344,14 +344,21 @@ class YOLOv5HSVRandomAug(BaseTransform):
         hsv_gains = \
             random.uniform(-1, 1, 3) * \
             [self.hue_delta, self.saturation_delta, self.value_delta] + 1
-        hue, sat, val = cv2.split(
-            cv2.cvtColor(results['img'], cv2.COLOR_BGR2HSV))
 
+        try:
+            hue, sat, val = cv2.split(
+                cv2.cvtColor(results['img'], cv2.COLOR_BGR2HSV))
+        except Exception as e:
+            print(e)
+            hue, sat, val = cv2.split(
+                cv2.cvtColor(np.float32(results['img']), cv2.COLOR_BGR2HSV))
         table_list = np.arange(0, 256, dtype=hsv_gains.dtype)
         lut_hue = ((table_list * hsv_gains[0]) % 180).astype(np.uint8)
         lut_sat = np.clip(table_list * hsv_gains[1], 0, 255).astype(np.uint8)
         lut_val = np.clip(table_list * hsv_gains[2], 0, 255).astype(np.uint8)
 
+        if hue.dtype == np.float32:
+            hue = np.uint8(hue)
         im_hsv = cv2.merge(
             (cv2.LUT(hue, lut_hue), cv2.LUT(sat,
                                             lut_sat), cv2.LUT(val, lut_val)))
